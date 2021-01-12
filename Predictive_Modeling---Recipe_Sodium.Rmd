@@ -1,0 +1,447 @@
+---
+title: "Predictive Modeling - Recipe Sodium"
+author: "Bill Peterson"
+date: "12/21/2018"
+output: 
+  github_document: 
+    toc: true
+  html_document: 
+    toc: true 
+    self_contained: true 
+---
+
+
+ 
+```{r setup, include=FALSE}
+# expand available Rjava memory
+options(java.parameters = "-Xmx1024m")
+
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+# What machine learning model best predicts sodium in a recipe?
+
+I fit additive and tree based regression models using k-fold cross-validation, centering, scaling, and hyperparameter tuning via grid search. I compare model performance via out of sample RMSE. 
+
+I use __*Ordinary Least Squares (OLS)*__, __*Partial Least Squares (PLS)*__, __*Multivariate Adaptive Regression Splines (MARS)*__, and __*Generalized Linear Model (GLM)*__ regression models to see the effect of using minimally preprocessed data (centering, scaling), 10 fold cross validation, built in feature selection, and easily interpretable variables of importance. I also fit for comparison the same __*OLS with data also preprocessed by PCA*__.
+
+I then fit __*Random Forest*__ and __*XGBoost*__ models to see if nonparametric tree based models were better predicting (produced a lower RMSE) than the additive models.
+
+
+#The Data - Epicurious - Recipies with Rating and Nutrition
+The recipe data "Epicurious - Recipies with Rating and Nutrition" is available as CSV and JSON files from Kaggle (https://www.kaggle.com/hugodarwood/epirecipes). I choose the JSON file to extract additional data for each recipe: the number of directions, the recipe description (an optional field), the number of ingredients listed in the recipe, and the number of categories the recipe was associated with. 
+
+There are 20130 rows with 11 variables in the raw data file, 1834 of which were duplicates. Of the 18,296 nonduplicative rows, 3,827 rows had missing values for sodium, fat, calories or protien and were removed. A total of 14,469 units remain for the analysis.
+
+```{r, message = FALSE}
+
+library(jsonlite)
+library(purrr)
+library(tidyr)
+library(dplyr)
+
+
+epi_json <- fromJSON("~/Downloads/full_format_recipes.json", flatten = TRUE) 
+epi_json <- distinct(epi_json)
+
+num_directions <- as_vector(map(epi_json$directions, length))
+num_ingredients <- as_vector(map(epi_json$ingredients, length))
+num_categories <- as_vector(map(epi_json$categories, length))
+desc_length <- as_vector(map(epi_json$desc, nchar))
+desc_length <- desc_length %>% replace_na(0)
+title <- as.vector(epi_json$title)
+title_length <- as_vector(map(epi_json$title, nchar))
+fat <- as.vector(epi_json$fat)
+calories <- as.vector(epi_json$calories)
+protein <- as.vector(epi_json$protein)
+sodium <- as.vector(epi_json$sodium)
+rating <- as.vector(epi_json$rating)
+
+recipes <- data.frame(title_length, desc_length, num_directions, num_ingredients, num_categories, fat, calories, protein, sodium, rating, title, stringsAsFactors = FALSE)
+
+# remove individual column vectors from R environment
+rm(num_categories)
+rm(num_directions)
+rm(num_ingredients)
+rm(desc_length)
+rm(fat)
+rm(protein)
+rm(calories)  
+rm(rating)
+rm(sodium)
+rm(title)
+rm(title_length)
+
+
+# remove recipes that do not have nutritional information: fat, calories, protein, sodium
+recipes_clean <- recipes[rowSums(is.na(recipes)) == 0,]
+
+
+```
+
+While the CSV file had over 600 dummy variables for ingredients and categories, it was not easily matchable to the JSON file. I used regular expressions to extract terms from the recipe titles to create nine categorical clusters that I am interested in: meat, seafood, herbs, spices, cheese, desserts, nuts, alcoholic, and chocolate. Another 99 records were also removed because of the large outlier nutrition data values which exceeded fat < 500, calories < 10000, sodium < 15000, or protein < 400. 14,370 observations remain. The calories variable was removed for being a highly correlated variable (.9) in the hope of reducing the error.
+```{r, message = FALSE}
+
+library(stringr)
+library(caret)
+meat_vec <- c("chicken", "poultry", "turkey", "fowl", "quail", "beef", "bacon",
+           "veal", "pork", "steak", "hamburger", "cheeseburger", "hot dog",
+           "hotdog", "sausage", "loin", "cutlet", "filet mignon", "sirloin",
+           "rib", "wing", "thigh", "leg", "drumstick", "snails", "escargot",
+           "brisket", "buffalo", "duck", "lamb", "ham", "meatball", "meatloaf",
+           "carne", "prosciutto", "pancetta", "rabbit", "goose", "meat", 
+           "venison", "game")
+
+seafood_vec <- c("salmon", "swordfish", "oyster", "mussel", "clam", "anchovy",
+             "bass", "cod", "crab", "fish", "mahi", "halibut", "lobster",
+             "crayfish", "shrimp", "octopus", "pescatarian", "sardine", 
+             "scallop", "seafood", "shellfish", "tilapia", "trout", "tuna",
+             "snapper", "squid")
+
+herbs_vec <- c("parsley", "sage", "rosemary", "thyme", "dill", "basil", "cilantro",
+           "fennel", "herb", "oregano", "tarragon", "chive")
+
+spices_vec <- c("caraway", "cumin", "cardamom", "allspice", "mace", "clove", 
+            "chile", "cayenne", "paprika", "cinnamon", "coriander", "curry",
+            "nutmeg", "poppy", "saffron", "sesame")
+
+cheese_vec <- c("feta", "colby", "cheddar", "monterey jack", "ricotta",
+            "mozzarella", "halumi", "gouda", "gruyere", "brie", "camabert",
+            "fontina", "parmesan" , "cheese", "marscarpone")
+
+nuts_vec <- c("hazelnut","macadamia", "peanut", "cashew", "peanut", "pecan", 
+          "walnut", "brazil nut", "tree nut", "pistacio", "pine nut", "nut")
+
+desserts_vec <- c("ice cream", "gelato", "cookie", "cake", "crumble", "cobbler",
+              "pie", "tart", "galette", "sorbet", "souffle", "meringue", 
+              "macaron", "macaroon", "phyllo", "pastry", "sweets", "brownie",
+              "blondie", "candy", "custard", "pudding", "milkshake", "sundae",
+              "dessert", "marshmallow", "smore", "cannoli" )
+
+alcoholic_vec <- c("campari", "gin", "vodka", "bourbon", "scotch" , "vermouth",
+               "martini", "wine", "whiskey", "triple sec", "tequila", "mezcal",
+               "spirit", "sherry", "sangria", "sake", "rum", "pernod", 
+               "midori", "frangelico", "liqueur", "kirsch", "kahlua", 
+               "cocktail", "grand marnier", "grappa", "fortified", 
+               "creme de cacao", "cognac", "armagnac", "chambord", 
+               "chartreuse", "champagne", "prosecco", "cava", "brandy", "beer",
+               "aperitif", "amaretto", "digestif", "margarita")
+
+chocolate_vec <- c("chocolate", "cocoa")
+
+meat_DV <- str_detect(str_to_lower(recipes_clean$title), 
+                       paste(meat_vec, collapse = "|"))
+seafood_DV <- str_detect(str_to_lower(recipes_clean$title), 
+                          paste(seafood_vec, collapse = "|"))
+herbs_DV <- str_detect(str_to_lower(recipes_clean$title), 
+                        paste(herbs_vec, collapse = "|"))
+spices_DV <- str_detect(str_to_lower(recipes_clean$title), 
+                         paste(spices_vec, collapse = "|"))
+cheese_DV <- str_detect(str_to_lower(recipes_clean$title), 
+                         paste(cheese_vec, collapse = "|"))
+nuts_DV <- str_detect(str_to_lower(recipes_clean$title), 
+                       paste(nuts_vec, collapse = "|"))
+desserts_DV <- str_detect(str_to_lower(recipes_clean$title), 
+                           paste(desserts_vec, collapse = "|"))
+alcoholic_DV <- str_detect(str_to_lower(recipes_clean$title), 
+                            paste(alcoholic_vec, collapse = "|"))
+chocolate_DV <- str_detect(str_to_lower(recipes_clean$title), 
+                            paste(chocolate_vec, collapse = "|"))
+
+recipes_clean <- recipes_clean %>% 
+                                mutate(meat_DV = as.factor(meat_DV),
+                                       seafood_DV = as.factor(seafood_DV),
+                                       herbs_DV = as.factor(herbs_DV),
+                                       spices_DV = as.factor(spices_DV),
+                                       cheese_DV = as.factor(cheese_DV),
+                                       nuts_DV = as.factor(nuts_DV),
+                                       desserts_DV = as.factor(desserts_DV),
+                                       alcoholic_DV = as.factor(alcoholic_DV),
+                                       chocolate_DV = as.factor(chocolate_DV))
+
+                                         
+recipes_clean <- recipes_clean %>% dplyr::filter(fat < 500, 
+                                       calories < 10000, 
+                                       sodium < 15000, 
+                                       protein < 400)
+
+
+## remove Highly Correlated Variables and Near Zero Predictors
+highCorr <- findCorrelation(cor(recipes_clean[,1:10]), cutoff = .8)
+recipes_clean <- recipes_clean[, - highCorr]
+
+NZV_predictor <- nearZeroVar(recipes_clean) #removed chocolate recipes
+recipes_clean <- recipes_clean[, -NZV_predictor]
+
+# remove the column with the recipe title 
+recipes_clean <- recipes_clean[, -10]
+
+# remove individual column vectors from R environment
+rm(alcoholic_DV)
+rm(alcoholic_vec)
+rm(cheese_DV)
+rm(cheese_vec)
+rm(chocolate_DV)
+rm(chocolate_vec)
+rm(herbs_DV)
+rm(herbs_vec)
+rm(desserts_DV)
+rm(desserts_vec)
+rm(meat_DV)
+rm(meat_vec)
+rm(nuts_DV)
+rm(nuts_vec)
+rm(seafood_DV)
+rm(seafood_vec)
+rm(spices_DV)
+rm(spices_vec)
+rm(recipes)
+rm(epi_json)
+```
+
+#Descriptive Statistics
+```{r}
+stargazer::stargazer(recipes_clean[,1:9], type = "text")
+
+psych::describe(recipes_clean[,1:9])
+```
+
+#Correlation Matrix
+```{r}
+ggcorrplot::ggcorrplot(cor(sapply(recipes_clean[,1:9], as.numeric)), 
+           hc.order = TRUE,
+           type = "upper",
+           lab = TRUE, 
+           digits = 2
+) 
+
+```
+
+
+The data was split into training and testing sets and will be modeled using 10-fold cross-validation unless otherwise specified. 
+```{r, train/test split}
+set.seed(12345)
+
+in_train_sodium <- createDataPartition(y = recipes_clean$sodium, p = 3 / 4, list = FALSE)
+training_sodium <- recipes_clean[in_train_sodium, ]
+testing_sodium <- recipes_clean[-in_train_sodium, ]
+
+ctrl <- trainControl(method = "cv", number = 10, verboseIter = TRUE)
+```
+
+
+##OLS Linear Regession - centered, scaled, and with interaction effects
+```{r, OLS with center and scaling, cache = TRUE}
+
+OLS_sodium_cs <- train(sodium ~ (.) ^ 2, 
+             data = training_sodium, 
+             method = "lm",
+             trControl = ctrl, 
+             preProcess = c("center", "scale" ))
+             
+y_hat_sodium_OLS_cs <- predict(OLS_sodium_cs, newdata = testing_sodium)
+
+defaultSummary(data.frame(obs = testing_sodium$sodium, pred = y_hat_sodium_OLS_cs))
+
+
+varImp(OLS_sodium_cs)
+```
+
+OLS chooses the coefficient values in order to minimize the sum-of-squared residuals (SSR) or sum-of-squared errors (SSE). Residuals are difference between the predicted value and actual observed value. Under strong assumptions, OLS is the Best Linear Unbiased Estimator (BLUE), meaning that among all linear estimators that are unbiased, OLS has the smallest variance in the coefficient estimates from one sample of size \(N\) to the next. Using an unbiased estimator for the coefficients presumes the true coefficients in the population are of interest. If we do not care about the distribution of the coefficient estimates from one random sample of size \(N\) to the next, then it is quite possible to obtain a non-linear or biased estimator that yields better predictions in the testing data. 
+
+A simple OLS regression model, with data that was centered and scaled, yielded a root mean R squared (RMSE) of 746.3521867. 
+
+Interestingly __*fat*__ and __*protein*__ appear in individual and interaction terms for 16 of the top 20 variables of importance for the OLS model. As we will later see, the __*number of ingredients*__ is also a recurring variable in later variables of importance. These variables are flagged as most important to the OLS model due to the size of the absolute value of the t-value for the variable. The t-value and the associated p-value measure the accuracy of the coefficient estimates. The larger t-statistic, the more precise the coefficient estimate is.
+
+##OLS Linear Regession - centered, scaled, PCA transformation, and with interaction effects
+```{r, OLS with PCA, cache = TRUE}
+
+OLS_sodium_pca <- train(sodium ~ (.) ^ 2, 
+             data = training_sodium, 
+             method = "lm",
+             trControl = ctrl, 
+             preProcess = c("center", "scale", "pca"))
+             
+y_hat_sodium_OLSpca <- predict(OLS_sodium_pca, newdata = testing_sodium)
+
+defaultSummary(data.frame(obs = testing_sodium$sodium, pred = y_hat_sodium_OLSpca))
+
+```
+
+The previous OLS model with a Principal Components Analysis (PCA) transformation of the predictors yielded a RMSE of 728.9543839. PCA constructs latent variables or components that maximize the variance of the predictor space. The first principal component is orthogonal to the second principal component, and so on, however this transformation comes at the expensive of coefficient interpretability. The OLS model with PCA improved upon the predictive accuracy of the previous OLS model and reduced the RMSE by over 17.
+
+
+##Partial Least Squares (PLS) Regression
+Partial Least Squares is similar to Principal Components Regression but does a matrix decomposition including the outcome as well, making it a more supervised learning approach. PLS is generally suited to a wide data, small sample problems with many possibly correlated covariates or predictor variables and few units of observation. The PLS method was included to explore as the number of predictors is quite large as each variable is interacted on each other. Unlike PCA, PLS coefficients retain interpretability.
+
+```{r, PLS Model, cache = TRUE}
+
+pls_grid <- data.frame(.ncomp = 1:100)
+PLS_sodium_bl <- train(sodium ~ (.) ^ 2, 
+             data = training_sodium, 
+             method = "pls",
+             trControl = ctrl, 
+             tuneGrid = pls_grid, 
+             preProcess = c("center", "scale"))
+y_hat_sodiumpls <- predict(PLS_sodium_bl, newdata = testing_sodium)
+defaultSummary(data.frame(obs = testing_sodium$sodium, pred = y_hat_sodiumpls))
+
+
+varImp(PLS_sodium_bl)
+
+
+```
+I anticipated the PLS model to be similar to the OLS model with PCA. The PLS model yielded a RMSE of 745.2232463, which is marginally better than the original OLS model (RMSE: 746.3521867), however still larger than the OLS with PCA (RMSE: 728.9543839). 
+
+## Multivariate Adaptive Regression Splines (MARS)
+The MARS model pieces multiple linear regession models to capture nonlinearity of polynomial regression by assessing knots or cutpoints much like step functions. The MARS model's hyperparameter tuning grid enables automatic feature selection by selecting the optimal number of interaction effects (degree) and the number of items to retain (nprune). Another beneift is the MARS model does not require preprocessing.
+
+```{r, MARS Model, cache = TRUE}
+library(doMC)
+registerDoMC(parallel::detectCores())
+
+library(earth)
+
+marsGrid <- expand.grid(.degree = 1:3, .nprune = 1:10)
+
+MARS_sodium <- train(sodium ~ (.) ^ 2, 
+               data = training_sodium, 
+               method = "earth",
+               trControl = ctrl, 
+               tuneGrid = marsGrid)  
+
+
+coef(MARS_sodium$finalModel)
+varImp(MARS_sodium)
+
+defaultSummary(data.frame(obs = testing_sodium$sodium, pred = predict(MARS_sodium, newdata = testing_sodium)[,1]))
+
+```
+
+The best MARS model was obtained from a tuning grid of degree = 1 and nprune = 7, which yielded and RMSE of 737.0283201. The MARS model improved upon the RMSE of the base OLS and PLS models, however still fell short of the RMSE of the OLS with PCA. 
+
+
+##Generalized Linear Model (GLM) via glmnet
+When a model overfits the data or there are collinearity issues, the OLS regression estimates may become inflated and increase the variance of the model. Regularization techniques introduce bias in the model to control the parameter estimates (and minimize SSE). By sacrificing some bias via the added penalty/regularization, the model may reduce the variance enough to make the overall mean squared error (MSE) lower than in an unbiased model. 
+
+Glmnet fits a generalized linear model via penalized maximum likelihood, using a mix of lasso (alpha = 1) and ridge (alpha = 0) regression, and the tuning parameter lambda which measures the strength of the regularization.  
+
+Ridge regression adds a penalty to the SSE that only adds parameters if there is a significant reduction in the SSE. Ridge regression shrinks parameters estimates to zero as the lambda penalty becomes large. Similar but different, lasso regression sets parameters to zero and removes them from the model.   
+
+```{r, glmnet, cache = TRUE}
+
+glmGrid <- expand.grid( alpha = 0:1,
+                        lambda = seq(0.0001, 0.1, length = 10))
+
+glmnet_sodium <- train(sodium ~ (.) ^ 2, 
+             data = training_sodium, 
+             method = "glmnet",
+             trControl = ctrl, 
+             tuneGrid = glmGrid, 
+             preProcess = c("center", "scale"))
+             
+y_hat_sodium_glmnet <- predict(glmnet_sodium, newdata = testing_sodium)
+defaultSummary(data.frame(obs = testing_sodium$sodium, pred = y_hat_sodium_glmnet))
+
+
+plot(glmnet_sodium)
+varImp(glmnet_sodium)
+```
+The final GLM model is a ridge regression (alpha = 0) with lambda of 0.1, with a RMSE of 731.8066370. Grid search determined the best alpha and lambda values for the glmnet model.
+
+
+##Random Forest
+Decision trees algorithmically partition predictor variables into subsets with a focus minimize the variance in the response variable within subsets. Decision trees are non-parametric, do not assume any particular functional form. 
+
+The random forest model is an ensemble method of decisions trees using bagging or Bootstrap Aggregating. Bagging randomly samples subsets of the training data. With each random sample a decision tree is fit which seeks to minimize the variance in the response variable (the predicted variable) within subsets. For a random forest, the final predictions of all trees are then aggregated and averaged by subset. Rather than searching for best predictors, the random sampling builds a series of diverse single trees. These single trees are "weak learners" are simple models that do better than random chance. These weak learners when averaged together reduce the overall variance of the model at the expense of equal or greater bias. 
+```{r, random forest, cache = TRUE}
+
+model <- train(sodium ~ (.) ^ 2, 
+               tuneLength = 5,
+               data = training_sodium, 
+               method = "ranger", 
+               trControl = trainControl(method = "cv", 
+                                        number = 5, 
+                                        verboseIter = TRUE))
+
+
+model
+
+
+y_hat_sodium_RF_bt <- predict(model, newdata = testing_sodium)
+defaultSummary(data.frame(obs = testing_sodium$sodium, pred = y_hat_sodium_RF_bt))
+
+
+```
+The best random forest model using 5-fold cross-validation yielded a RMSE of 734.0469071, with 5 as min.node.size or depth of the decision tree. Perhaps a finer tuned random forest, with a smaller min.node.size (closer to the XGBoost max depth parameter) might yield a lower RMSE. 
+
+##XGBoost
+eXtreme Gradient Boosting (XGBoost) is a tree based ensemble model that boosts weak learners by interatively learning from previous models. Boosting starts by fitting an initial model, and then a subsequent model is built that focuses on accurately predicting the cases where the previous model performs poorly. This process is then repeated where each successive model attempts to correct for the shortcomings of the previous model. The  of these two models is expected to be better than either model alone. Then you repeat this process of boosting many times. Each successive model attempts to correct for the shortcomings of the combined boosted ensemble of all previous models.
+ 
+XGBoost improves upon the boosting model framework by focusing on minimzing the overall prediction error of successive models using gradient descent. Each new model is fit to the new residuals based on the gradient of the error with respoct to the prediction. 
+
+```{r, xgboost, cache = TRUE}
+nrounds <- 1000
+
+tune_grid <- expand.grid(
+  nrounds = seq(from = 200, to = nrounds, by = 50),
+  eta = c(0.025, 0.05, 0.1, 0.3),
+  max_depth = c(2, 3, 4, 5, 6),
+  gamma = 0,
+  colsample_bytree = 1,
+  min_child_weight = 1,
+  subsample = 1
+)
+
+tune_control <- trainControl(
+  method = "cv", 
+  number = 5, 
+  verboseIter = FALSE, 
+  allowParallel = FALSE # FALSE for reproducible results 
+)
+
+xgb_tune <- caret::train(
+  sodium ~ (.) ^ 2, 
+  data = training_sodium, 
+  trControl = tune_control,
+  tuneGrid = tune_grid,
+  method = "xgbTree",
+  verbose = TRUE
+)
+
+xgb_tune$bestTune
+
+yhat_xbgbest <- predict(xgb_tune, newdata = testing_sodium)
+defaultSummary(data.frame(obs = testing_sodium$sodium, pred = yhat_xbgbest))
+```
+
+The XGBoost model with 5-fold cross-validation yielded an RMSE of 729.7695761. This best XGBoost model used a tuning grid to determine the best max depth for the decision tree (2), and the number of decision trees (250) to fit per cross-validation fold.
+
+
+
+
+#Conclusion
+The base OLS regression model was the worst predicting model. This is no surprise as the OLS approach focuses on producing the least biased estimates at the expense of variance. Dimensionality reduction techiniques via OLS with PCA transformation of the regressors and the PLS model also improvded the base OLS model with mixed results. The OLS model with PCA transformation produced the best model overall with an RMSE of 728.9543839. This was somewhat surprising given the reputation of GLM and ensemble tree based models to produce accurate and robust models.
+
+The greater flexibility allowed by the MARS model also improved upon the base OLS and PLS model but might have also been a limiting factor. The GLM model with penalization/regularization improved upon the previous predictions of the base OLS, PLS and MARS models by allowing for more biased models with lower variance. The non-parametic based models of Random Forests and XGBoost aggregated many iterations of decisions trees produce two of the more predictive models, with the XGBoost producing the second best predictive model with an RMSE of 729.7695761. 
+
+Interestingly, the variables of importance for when applicable indicated that protein and fat and to a lesser extent the number of ingredients, routinely appeared as some of the most influential variables to the models that predicited recipe sodium. This seems intuitive as sodium is a flavor enhancer, fats can help distribute sodium throughout foods and provide a mouth feel, and protein is critical to growth and repair in the human body. Presumably as recipes get more complicated with more ingredients, sodium will be more likely to appear and possibly in greater amounts. 
+
+The final models and RMSEs:
+model: RMSE
+
+OLS (center & scale) - RMSE: 746.3521867 
+
+OLS (center, scale, & PCA) - RMSE: 728.9543839 
+
+PLS (center & scale) - RMSE: 745.2232463
+
+MARS (center & scale) - RMSE: 737.0283201 
+
+glmnet (center & scale) - RMSE: 731.8066370
+
+Random forest - RMSE: 734.0469071
+
+XGBoost - RMSE: 729.7695761
+
+
