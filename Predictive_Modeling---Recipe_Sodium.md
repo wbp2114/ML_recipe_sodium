@@ -4,11 +4,11 @@ Bill Peterson
 12/21/2018
 
 -   [What machine learning model best predicts sodium in a recipe?](#what-machine-learning-model-best-predicts-sodium-in-a-recipe)
--   [The Data - Epicurious - Recipies with Rating and Nutrition](#the-data---epicurious---recipies-with-rating-and-nutrition)
+-   [The Data - Epicurious - Recipes with Rating and Nutrition](#the-data---epicurious---recipes-with-rating-and-nutrition)
 -   [Descriptive Statistics](#descriptive-statistics)
 -   [Correlation Matrix](#correlation-matrix)
-    -   [OLS Linear Regession - centered, scaled, and with interaction effects](#ols-linear-regession---centered-scaled-and-with-interaction-effects)
-    -   [OLS Linear Regession - centered, scaled, PCA transformation, and with interaction effects](#ols-linear-regession---centered-scaled-pca-transformation-and-with-interaction-effects)
+    -   [OLS Linear Regression - centered, scaled, and with interaction effects](#ols-linear-regession---centered-scaled-and-with-interaction-effects)
+    -   [OLS Linear Regression - centered, scaled, PCA transformation, and with interaction effects](#ols-linear-regession---centered-scaled-pca-transformation-and-with-interaction-effects)
     -   [Partial Least Squares (PLS) Regression](#partial-least-squares-pls-regression)
     -   [Multivariate Adaptive Regression Splines (MARS)](#multivariate-adaptive-regression-splines-mars)
     -   [Generalized Linear Model (GLM) via glmnet](#generalized-linear-model-glm-via-glmnet)
@@ -24,9 +24,9 @@ I use ***Ordinary Least Squares (OLS)***, ***Partial Least Squares (PLS)***, ***
 
 I then fit ***Random Forest*** and ***XGBoost*** models to see if nonparametric tree based models were better predicting (produced a lower RMSE) than the additive models.
 
-# The Data - Epicurious - Recipies with Rating and Nutrition
+# The Data - Epicurious - Recipes with Rating and Nutrition
 
-The recipe data "Epicurious - Recipies with Rating and Nutrition" is available as CSV and JSON files from Kaggle (<https://www.kaggle.com/hugodarwood/epirecipes>). I choose the JSON file to extract additional data for each recipe: the number of directions, the recipe description (an optional field), the number of ingredients listed in the recipe, and the number of categories the recipe was associated with.
+The recipe data "Epicurious - Recipes with Rating and Nutrition" is available as CSV and JSON files from Kaggle (<https://www.kaggle.com/hugodarwood/epirecipes>). I choose the JSON file to extract additional data for each recipe: the number of directions, the recipe description (an optional field), the number of ingredients listed in the recipe, and the number of categories the recipe was associated with.
 
 There are 20130 rows with 11 variables in the raw data file, 1834 of which were duplicates. Of the 18,296 nonduplicative rows, 3,827 rows had missing values for sodium, fat, calories or protien and were removed. A total of 14,469 units remain for the analysis.
 
@@ -264,7 +264,7 @@ testing_sodium <- recipes_clean[-in_train_sodium, ]
 ctrl <- trainControl(method = "cv", number = 10, verboseIter = TRUE)
 ```
 
-## OLS Linear Regession - centered, scaled, and with interaction effects
+## OLS Linear Regression - centered, scaled, and with interaction effects
 
 ``` r
 OLS_sodium_cs <- train(sodium ~ (.) ^ 2, 
@@ -342,7 +342,7 @@ A simple OLS regression model, with data that was centered and scaled, yielded a
 
 Interestingly ***fat*** and ***protein*** appear in individual and interaction terms for 16 of the top 20 variables of importance for the OLS model. As we will later see, the ***number of ingredients*** is also a recurring variable in later variables of importance. These variables are flagged as most important to the OLS model due to the size of the absolute value of the t-value for the variable. The t-value and the associated p-value measure the accuracy of the coefficient estimates. The larger t-statistic, the more precise the coefficient estimate is.
 
-## OLS Linear Regession - centered, scaled, PCA transformation, and with interaction effects
+## OLS Linear Regression - centered, scaled, PCA transformation, and with interaction effects
 
 ``` r
 OLS_sodium_pca <- train(sodium ~ (.) ^ 2, 
@@ -466,7 +466,7 @@ I anticipated the PLS model to be similar to the OLS model with PCA. The PLS mod
 
 ## Multivariate Adaptive Regression Splines (MARS)
 
-The MARS model pieces multiple linear regession models to capture nonlinearity of polynomial regression by assessing knots or cutpoints much like step functions. The MARS model's hyperparameter tuning grid enables automatic feature selection by selecting the optimal number of interaction effects (degree) and the number of items to retain (nprune). Another beneift is the MARS model does not require preprocessing.
+The MARS model pieces multiple linear regression models to capture nonlinearity of polynomial regression by assessing knots or cutpoints much like step functions. The MARS model's hyperparameter tuning grid enables automatic feature selection by selecting the optimal number of interaction effects (degree) and the number of items to retain (nprune). Another beneift is the MARS model does not require preprocessing.
 
 ``` r
 library(doMC)
@@ -687,7 +687,7 @@ The best random forest model using 5-fold cross-validation yielded a RMSE of 734
 
 eXtreme Gradient Boosting (XGBoost) is a tree based ensemble model that boosts weak learners by interatively learning from previous models. Boosting starts by fitting an initial model, and then a subsequent model is built that focuses on accurately predicting the cases where the previous model performs poorly. This process is then repeated where each successive model attempts to correct for the shortcomings of the previous model. The of these two models is expected to be better than either model alone. Then you repeat this process of boosting many times. Each successive model attempts to correct for the shortcomings of the combined boosted ensemble of all previous models.
 
-XGBoost improves upon the boosting model framework by focusing on minimzing the overall prediction error of successive models using gradient descent. Each new model is fit to the new residuals based on the gradient of the error with respoct to the prediction.
+XGBoost improves upon the boosting model framework by focusing on minimzing the overall prediction error of successive models using gradient descent. Each new model is fit to the new residuals based on the gradient of the error with respect to the prediction.
 
 ``` r
 nrounds <- 1000
